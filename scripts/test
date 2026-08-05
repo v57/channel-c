@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$ROOT/build"
+TS_ROOT="$(cd "$ROOT/../channel" && pwd)"
+TS_SERVER="$TS_ROOT/tests/server.ts"
+TS_PID=""
+
+cleanup() {
+  if [[ -n "${TS_PID}" ]] && kill -0 "${TS_PID}" 2>/dev/null; then
+    kill "${TS_PID}" >/dev/null 2>&1 || true
+    wait "${TS_PID}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+mkdir -p "$ROOT/coverage"
+
+cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
+cmake --build "$BUILD_DIR" -j8
+
+pushd "$TS_ROOT" >/dev/null
+bun "$TS_SERVER" > "$ROOT/coverage/ts-server.log" 2>&1 &
+TS_PID=$!
+popd >/dev/null
+
+for _ in $(seq 1 200); do
+  if nc -z 127.0.0.1 2049 >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+
+if ! nc -z 127.0.0.1 2049 >/dev/null 2>&1; then
+  echo "failed to start TypeScript fixture server on 127.0.0.1:2049" >&2
+  tail -n 200 "$ROOT/coverage/ts-server.log" >&2 || true
+  exit 1
+fi
+
+cd "$BUILD_DIR"
+ctest --output-on-failure

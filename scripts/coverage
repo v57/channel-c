@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$ROOT/build-coverage"
+COVERAGE_DIR="$ROOT/coverage"
+TS_ROOT="$(cd "$ROOT/../channel" && pwd)"
+TS_SERVER="$TS_ROOT/tests/server.ts"
+TS_PID=""
+
+cleanup() {
+  if [[ -n "${TS_PID}" ]] && kill -0 "${TS_PID}" 2>/dev/null; then
+    kill "${TS_PID}" >/dev/null 2>&1 || true
+    wait "${TS_PID}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+mkdir -p "$COVERAGE_DIR"
+
+cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
+cmake --build "$BUILD_DIR" -j8
+
+find "$BUILD_DIR" -name '*.gcda' -delete
+
+pushd "$TS_ROOT" >/dev/null
+bun "$TS_SERVER" > "$COVERAGE_DIR/ts-server.log" 2>&1 &
+TS_PID=$!
+popd >/dev/null
+
+for _ in $(seq 1 200); do
+  if nc -z 127.0.0.1 2049 >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+
+if ! nc -z 127.0.0.1 2049 >/dev/null 2>&1; then
+  echo "failed to start TypeScript fixture server on 127.0.0.1:2049" >&2
+  tail -n 200 "$COVERAGE_DIR/ts-server.log" >&2 || true
+  exit 1
+fi
+
+cd "$BUILD_DIR"
+ctest --output-on-failure
+
+GCOV_WRAPPER="$BUILD_DIR/llvm-gcov-wrapper.sh"
+cat > "$GCOV_WRAPPER" <<'WRAP'
+#!/usr/bin/env bash
+exec "$(xcrun --find llvm-cov)" gcov "$@"
+WRAP
+chmod +x "$GCOV_WRAPPER"
+
+lcov --quiet --ignore-errors unused,unsupported --capture --directory "$BUILD_DIR" --output-file "$COVERAGE_DIR/lcov.raw.info" --gcov-tool "$GCOV_WRAPPER"
+lcov --quiet --ignore-errors unused,unsupported --remove "$COVERAGE_DIR/lcov.raw.info" '/opt/*' '/usr/*' '*/tests/*' --output-file "$COVERAGE_DIR/lcov.info"
+
+rm -f "$COVERAGE_DIR/lcov.raw.info"
+
+echo "coverage written to $COVERAGE_DIR/lcov.info"

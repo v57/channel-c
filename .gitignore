@@ -1,0 +1,15 @@
+# CMake build directories
+build/
+build-*/
+cmake-build-*/
+
+# Test and coverage output
+coverage/*.log
+coverage/*.info
+coverage/.ts_server_pid
+
+# Benchmark output
+/benchmark.json
+
+# macOS
+.DS_Store
