@@ -2,7 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$ROOT/build"
+# A dedicated build dir configured with --fresh: the checked-in-era `build/` caches point at an old
+# libwebsockets/OpenSSL layout and fail to configure (AUDIT section 5). Override with BUILD_DIR=...
+# SANITIZE=1 builds with AddressSanitizer + UBSan.
+BUILD_DIR="${BUILD_DIR:-$ROOT/build-test}"
+SANITIZE="${SANITIZE:-0}"
 TS_ROOT="$(cd "$ROOT/../channel" && pwd)"
 TS_SERVER="$TS_ROOT/tests/server.ts"
 TS_PID=""
@@ -17,13 +21,17 @@ trap cleanup EXIT
 
 mkdir -p "$ROOT/coverage"
 
-cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
+cmake --fresh -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DCHANNEL_C_SANITIZE="$([[ "$SANITIZE" == 1 ]] && echo ON || echo OFF)"
 cmake --build "$BUILD_DIR" -j8
 
-pushd "$TS_ROOT" >/dev/null
-bun "$TS_SERVER" > "$ROOT/coverage/ts-server.log" 2>&1 &
-TS_PID=$!
-popd >/dev/null
+if nc -z 127.0.0.1 2049 >/dev/null 2>&1; then
+  echo "Using existing fixture server on 127.0.0.1:2049"
+else
+  pushd "$TS_ROOT" >/dev/null
+  bun "$TS_SERVER" > "$ROOT/coverage/ts-server.log" 2>&1 &
+  TS_PID=$!
+  popd >/dev/null
+fi
 
 for _ in $(seq 1 200); do
   if nc -z 127.0.0.1 2049 >/dev/null 2>&1; then
