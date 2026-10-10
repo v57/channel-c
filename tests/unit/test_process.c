@@ -154,11 +154,20 @@ static void test_process_send_and_stream(void **state) {
   channel_c_channel_free(channel);
 }
 
+static int g_any_event_count = 0;
+
+static void on_any_event(const char *body_json, void *user_data) {
+  (void)body_json;
+  (void)user_data;
+  g_any_event_count += 1;
+}
+
 static void test_process_subscribe_and_cancel(void **state) {
   channel_c_channel_t *channel;
   channel_c_process_t *process;
   channel_c_sender_t *sender;
   channel_c_subscription_handle_t *handle = NULL;
+  channel_c_subscription_handle_t *any_handle = NULL;
   char *error = NULL;
   int count = 0;
 
@@ -183,6 +192,25 @@ static void test_process_subscribe_and_cancel(void **state) {
   assert_null(error);
   usleep(1000);
   assert_int_equal(count, 1);
+
+  g_any_event_count = 0;
+  assert_int_equal(
+    channel_c_sender_subscribe(sender, "hello", "\"test\"", NULL, on_any_event, NULL, &any_handle, &error),
+    0
+  );
+
+  /* falsy bodies are dropped like TS Subscription.publish */
+  assert_int_equal(channel_c_channel_event_send(channel, "hello", "\"test\"", "0", &error), 0);
+  assert_int_equal(channel_c_channel_event_send(channel, "hello", "\"test\"", "false", &error), 0);
+  assert_int_equal(channel_c_channel_event_send(channel, "hello", "\"test\"", "\"\"", &error), 0);
+  assert_int_equal(channel_c_channel_event_send(channel, "hello", "\"test\"", "null", &error), 0);
+  assert_null(error);
+  usleep(1000);
+  assert_int_equal(g_any_event_count, 0);
+  assert_int_equal(channel_c_channel_event_send(channel, "hello", "\"test\"", "\"0\"", &error), 0);
+  usleep(1000);
+  assert_int_equal(g_any_event_count, 1);
+  channel_c_subscription_cancel(any_handle);
 
   channel_c_subscription_cancel(handle);
   handle = NULL;

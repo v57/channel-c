@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -946,6 +947,26 @@ channel_c_sender_t *channel_c_connection_sender(channel_c_connection_t *connecti
   return &connection->sender;
 }
 
+void *channel_c_connection_state(channel_c_connection_t *connection) {
+  return connection ? connection->state : NULL;
+}
+
+const char *channel_c_headers_get(const channel_c_headers_t *headers, const char *name) {
+  size_t index;
+  if (!headers || !name) return NULL;
+  for (index = 0; index < headers->count; index += 1) {
+    const char *candidate = headers->items[index].name;
+    size_t offset = 0;
+    if (!candidate) continue;
+    while (candidate[offset] && name[offset] &&
+           tolower((unsigned char)candidate[offset]) == tolower((unsigned char)name[offset])) {
+      offset += 1;
+    }
+    if (!candidate[offset] && !name[offset]) return headers->items[index].value;
+  }
+  return NULL;
+}
+
 int channel_c_connection_is_connected(channel_c_connection_t *connection) {
   if (!connection) return 0;
   return connection->connected && !connection->closed;
@@ -1641,7 +1662,14 @@ static void process_object(channel_c_connection_t *connection, yyjson_val *objec
     request_id = (int)yyjson_get_sint(id_val);
   }
   if (body_val) body_json = json_write_value(body_val);
-  if (yyjson_is_str(error_val)) error_text = channel_c_strdup(yyjson_get_str(error_val));
+  if (yyjson_is_str(error_val)) {
+    error_text = channel_c_strdup(yyjson_get_str(error_val));
+  } else if (error_val && !yyjson_is_null(error_val)) {
+    /* A non-string error (e.g. {"code":500}) is still an error: surface its JSON text instead of
+     * treating the reply as a success with an empty body (AUDIT2 section 3). */
+    error_text = json_write_value(error_val);
+    if (!error_text) error_text = channel_c_strdup("invalid error");
+  }
   if (done_val && yyjson_is_bool(done_val)) {
     has_done = 1;
     done_value = yyjson_get_bool(done_val) ? 1 : 0;
@@ -1891,6 +1919,29 @@ int channel_c_channel_merge(channel_c_channel_t *destination, channel_c_channel_
   return 0;
 }
 
+static int json_text_is_falsy(const char *json_text) {
+  yyjson_doc *doc;
+  yyjson_val *root;
+  int falsy = 0;
+
+  if (!json_text) return 1;
+  doc = yyjson_read(json_text, strlen(json_text), YYJSON_READ_ALLOW_INF_AND_NAN);
+  if (!doc) return 0;
+  root = yyjson_doc_get_root(doc);
+  if (!root || yyjson_is_null(root)) {
+    falsy = 1;
+  } else if (yyjson_is_bool(root)) {
+    falsy = !yyjson_get_bool(root);
+  } else if (yyjson_is_num(root)) {
+    double number = yyjson_get_num(root);
+    falsy = number == 0 || number != number;
+  } else if (yyjson_is_str(root)) {
+    falsy = yyjson_get_len(root) == 0;
+  }
+  yyjson_doc_free(doc);
+  return falsy;
+}
+
 int channel_c_channel_event_send(
   channel_c_channel_t *channel,
   const char *subscription_name,
@@ -1943,6 +1994,12 @@ int channel_c_channel_event_send(
     if (out_error) *out_error = channel_c_strdup("body is required");
     free(topic);
     return -1;
+  }
+  if (json_text_is_falsy(body)) {
+    /* TS Subscription.publish drops falsy bodies (`if (!body) return`): null, false, 0, "". */
+    free(topic);
+    free(body);
+    return 0;
   }
 
   full_topic = join_prefix(entry->prefix, topic);
