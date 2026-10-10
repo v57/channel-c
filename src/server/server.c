@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -180,11 +181,17 @@ static void server_remove_client(struct channel_c_server *server, server_client_
   }
 }
 
-static int server_rx_append(server_client_t *client, const char *data, size_t length) {
+static int server_rx_append(server_client_t *client, const char *data, size_t length, size_t remaining) {
   char *buffer;
   size_t required;
 
   if (!client || !data || length == 0) return 0;
+  /* Cap whole messages (fragments included) instead of buffering without bound. `remaining` is the
+   * rest of the current frame as announced by its header, so oversized frames fail early. */
+  if (length > CHANNEL_C_MAX_MESSAGE_SIZE - client->rx_length ||
+      remaining > CHANNEL_C_MAX_MESSAGE_SIZE - client->rx_length - length) {
+    return -1;
+  }
   required = client->rx_length + length + 1;
   if (required > client->rx_capacity) {
     size_t capacity = client->rx_capacity ? client->rx_capacity : 1024;
@@ -200,6 +207,147 @@ static int server_rx_append(server_client_t *client, const char *data, size_t le
   client->rx_length += length;
   client->rx_buffer[client->rx_length] = '\0';
   return 0;
+}
+
+typedef struct {
+  channel_c_header_t *items;
+  size_t count;
+  size_t capacity;
+  struct lws *wsi;
+  int failed;
+} header_list_t;
+
+static void header_list_free(header_list_t *list) {
+  size_t index;
+  for (index = 0; index < list->count; index += 1) {
+    free((char *)list->items[index].name);
+    free((char *)list->items[index].value);
+  }
+  free(list->items);
+  list->items = NULL;
+  list->count = 0;
+  list->capacity = 0;
+}
+
+/* Sets name (lowercased, trailing ':' dropped) = value; a later set for the same name wins. */
+static void header_list_set(header_list_t *list, const char *name, size_t name_length, const char *value, size_t value_length) {
+  char *owned_name;
+  char *owned_value;
+  size_t index;
+
+  while (name_length > 0 && (name[name_length - 1] == ':' || name[name_length - 1] == ' ')) name_length -= 1;
+  if (name_length == 0 || list->failed) return;
+
+  owned_name = (char *)malloc(name_length + 1);
+  owned_value = (char *)malloc(value_length + 1);
+  if (!owned_name || !owned_value) {
+    free(owned_name);
+    free(owned_value);
+    list->failed = 1;
+    return;
+  }
+  for (index = 0; index < name_length; index += 1) owned_name[index] = (char)tolower((unsigned char)name[index]);
+  owned_name[name_length] = '\0';
+  memcpy(owned_value, value, value_length);
+  owned_value[value_length] = '\0';
+
+  for (index = 0; index < list->count; index += 1) {
+    if (strcmp(list->items[index].name, owned_name) == 0) {
+      free(owned_name);
+      free((char *)list->items[index].value);
+      list->items[index].value = owned_value;
+      return;
+    }
+  }
+  if (list->count == list->capacity) {
+    size_t capacity = list->capacity ? list->capacity * 2 : 16;
+    channel_c_header_t *items = (channel_c_header_t *)realloc(list->items, capacity * sizeof(channel_c_header_t));
+    if (!items) {
+      free(owned_name);
+      free(owned_value);
+      list->failed = 1;
+      return;
+    }
+    list->items = items;
+    list->capacity = capacity;
+  }
+  list->items[list->count].name = owned_name;
+  list->items[list->count].value = owned_value;
+  list->count += 1;
+}
+
+static void header_list_add_custom(const char *name, int name_length, void *opaque) {
+  header_list_t *list = (header_list_t *)opaque;
+  int value_length;
+  char *value;
+
+  if (!list || !name || name_length <= 0) return;
+  value_length = lws_hdr_custom_length(list->wsi, name, name_length);
+  if (value_length < 0) return;
+  value = (char *)malloc((size_t)value_length + 1);
+  if (!value) {
+    list->failed = 1;
+    return;
+  }
+  if (lws_hdr_custom_copy(list->wsi, value, value_length + 1, name, name_length) >= 0) {
+    header_list_set(list, name, (size_t)name_length, value, strlen(value));
+  }
+  free(value);
+}
+
+/* Query parameters first, then request headers, so headers win (TS server.ts). */
+static void server_collect_headers(struct lws *wsi, header_list_t *list) {
+  char fragment[2048];
+  int index;
+  int token;
+
+  list->wsi = wsi;
+  for (index = 0; index < 256; index += 1) {
+    int fragment_length = lws_hdr_copy_fragment(wsi, fragment, (int)sizeof(fragment), WSI_TOKEN_HTTP_URI_ARGS, index);
+    const char *separator;
+    if (fragment_length < 0) break;
+    separator = memchr(fragment, '=', (size_t)fragment_length);
+    if (separator) {
+      header_list_set(list, fragment, (size_t)(separator - fragment), separator + 1,
+                      (size_t)fragment_length - (size_t)(separator - fragment) - 1);
+    } else {
+      header_list_set(list, fragment, (size_t)fragment_length, "", 0);
+    }
+  }
+
+  for (token = 0; token < (int)WSI_TOKEN_COUNT; token += 1) {
+    const unsigned char *name = lws_token_to_string((enum lws_token_indexes)token);
+    size_t name_length;
+    int value_length;
+    char *value;
+
+    if (!name) continue;
+    name_length = strlen((const char *)name);
+    /* Only real "name:" headers; skip pseudo tokens like "get " / ":path". */
+    if (name_length < 2 || name[0] == ':' || name[name_length - 1] != ':') continue;
+    value_length = lws_hdr_total_length(wsi, (enum lws_token_indexes)token);
+    if (value_length <= 0) continue;
+    value = (char *)malloc((size_t)value_length + 1);
+    if (!value) {
+      list->failed = 1;
+      return;
+    }
+    if (lws_hdr_copy(wsi, value, value_length + 1, (enum lws_token_indexes)token) >= 0) {
+      header_list_set(list, (const char *)name, name_length, value, strlen(value));
+    }
+    free(value);
+  }
+
+  (void)lws_hdr_custom_name_foreach(wsi, header_list_add_custom, list);
+}
+
+static void server_client_disconnect_hook(struct channel_c_server *server, server_client_t *client) {
+  if (!server || !client || !client->connection || !server->state_factory.on_disconnect) return;
+  server->state_factory.on_disconnect(
+    channel_c_connection_state(client->connection),
+    channel_c_connection_sender(client->connection),
+    server->state_factory.user_data
+  );
 }
 
 static int server_ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t length) {
@@ -220,7 +368,21 @@ static int server_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         client = (server_client_t *)calloc(1, sizeof(server_client_t));
         if (!client) return -1;
 
-        if (server->state_factory.create) {
+        if (server->state_factory.create_with_headers) {
+          header_list_t list;
+          channel_c_headers_t headers;
+          memset(&list, 0, sizeof(list));
+          server_collect_headers(wsi, &list);
+          if (list.failed) {
+            header_list_free(&list);
+            free(client);
+            return -1;
+          }
+          headers.items = list.items;
+          headers.count = list.count;
+          state = server->state_factory.create_with_headers(&headers, server->state_factory.user_data);
+          header_list_free(&list);
+        } else if (server->state_factory.create) {
           state = server->state_factory.create(server->state_factory.user_data);
         }
 
@@ -253,12 +415,19 @@ static int server_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         server->clients = client;
         if (client_slot) *client_slot = client;
         channel_c_connection_mark_connected(client->connection, 1);
+        if (server->state_factory.on_connect) {
+          server->state_factory.on_connect(
+            channel_c_connection_state(client->connection),
+            channel_c_connection_sender(client->connection),
+            server->state_factory.user_data
+          );
+        }
       }
       break;
 
     case LWS_CALLBACK_RECEIVE:
       if (!client) return -1;
-      if (server_rx_append(client, (const char *)in, length) != 0) return -1;
+      if (server_rx_append(client, (const char *)in, length, lws_remaining_packet_payload(wsi)) != 0) return -1;
       if (lws_is_final_fragment(wsi) && lws_remaining_packet_payload(wsi) == 0) {
         server->progress_counter += 1;
         channel_c_connection_receive_text(client->connection, client->rx_buffer);
@@ -319,6 +488,7 @@ static int server_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
         client->wsi = NULL;
         server_remove_client(server, client);
         channel_c_connection_on_close(client->connection);
+        server_client_disconnect_hook(server, client);
         channel_c_connection_release(client->connection);
         queued_message_free_all(client->queue_head);
         free(client->rx_buffer);
@@ -457,6 +627,7 @@ void channel_c_server_stop(channel_c_server_t *server) {
     client->closed = 1;
     client->wsi = NULL;
     channel_c_connection_on_close(client->connection);
+    server_client_disconnect_hook(s, client);
     channel_c_connection_release(client->connection);
     queued_message_free_all(client->queue_head);
     free(client->rx_buffer);

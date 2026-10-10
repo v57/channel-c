@@ -34,6 +34,7 @@ void channel_c_connection_receive_text(channel_c_connection_t *connection, const
 void channel_c_connection_on_close(channel_c_connection_t *connection);
 void channel_c_connection_stop(channel_c_connection_t *connection);
 channel_c_sender_t *channel_c_connection_sender(channel_c_connection_t *connection);
+void *channel_c_connection_state(channel_c_connection_t *connection);
 int channel_c_connection_is_connected(channel_c_connection_t *connection);
 int channel_c_connection_is_closed(channel_c_connection_t *connection);
 int channel_c_connection_is_remote_subscribed(channel_c_connection_t *connection, const char *topic);

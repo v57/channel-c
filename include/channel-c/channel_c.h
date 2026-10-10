@@ -58,11 +58,47 @@ typedef void (*channel_c_event_callback_fn)(const char *body_json, void *user_da
 typedef void *(*channel_c_state_create_fn)(void *user_data);
 typedef void (*channel_c_state_destroy_fn)(void *state, void *user_data);
 
+/* Largest incoming message (a whole, possibly fragmented, WebSocket message) the client and server
+ * accept, matching the TS/Bun default max payload. Larger messages close the connection. */
+#define CHANNEL_C_MAX_MESSAGE_SIZE (16u * 1024u * 1024u)
+
+typedef struct {
+  const char *name;
+  const char *value;
+} channel_c_header_t;
+
+/* Request headers seen by a server state factory: lowercase names, query parameters merged in
+ * first and then overridden by real headers (headers win, as in TS `listen({ state })`). */
+typedef struct {
+  const channel_c_header_t *items;
+  size_t count;
+} channel_c_headers_t;
+
+/* Case-insensitive lookup; NULL when absent. */
+const char *channel_c_headers_get(const channel_c_headers_t *headers, const char *name);
+
+typedef void *(*channel_c_state_create_with_headers_fn)(const channel_c_headers_t *headers, void *user_data);
+typedef void (*channel_c_connection_hook_fn)(void *state, channel_c_sender_t *sender, void *user_data);
+
 typedef struct {
   channel_c_state_create_fn create;
   channel_c_state_destroy_fn destroy;
   void *user_data;
+  /* Optional; zero-initialize when unused. `create_with_headers` takes precedence over `create`
+   * (TS `state(headers)`); the headers are only valid during the call. `on_connect` /
+   * `on_disconnect` mirror TS `onConnect` / `onDisconnect`. */
+  channel_c_state_create_with_headers_fn create_with_headers;
+  channel_c_connection_hook_fn on_connect;
+  channel_c_connection_hook_fn on_disconnect;
 } channel_c_state_factory_t;
+
+typedef struct {
+  void *state;
+  channel_c_state_destroy_fn state_destroy;
+  /* Extra handshake request headers (e.g. auth). Copied during connect. */
+  const channel_c_header_t *headers;
+  size_t header_count;
+} channel_c_client_options_t;
 
 #define CHANNEL_C_POST_IGNORE_BODY 0x1u
 #define CHANNEL_C_POST_IGNORE_CONTEXT 0x2u
@@ -154,6 +190,13 @@ channel_c_client_t *channel_c_client_connect(
   const char *url,
   void *state,
   channel_c_state_destroy_fn state_destroy,
+  char **out_error
+);
+/* Like channel_c_client_connect, plus handshake headers. `options` may be NULL. */
+channel_c_client_t *channel_c_client_connect_with_options(
+  channel_c_channel_t *channel,
+  const char *url,
+  const channel_c_client_options_t *options,
   char **out_error
 );
 channel_c_sender_t *channel_c_client_sender(channel_c_client_t *client);

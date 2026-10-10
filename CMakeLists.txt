@@ -6,6 +6,12 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 option(ENABLE_COVERAGE "Enable coverage instrumentation" OFF)
+option(CHANNEL_C_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+if(CHANNEL_C_SANITIZE)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+  add_link_options(-fsanitize=address,undefined)
+endif()
 
 if(ENABLE_COVERAGE)
   add_compile_options(-O0 -g --coverage)
@@ -65,6 +71,10 @@ add_test(NAME integration_ts_server COMMAND test_ts_server)
 add_executable(test_c_server tests/integration/test_c_server.c)
 target_link_libraries(test_c_server PRIVATE channel_c PkgConfig::CMOCKA)
 add_test(NAME integration_c_server COMMAND test_c_server)
+
+add_executable(test_c_robustness tests/integration/test_c_robustness.c)
+target_link_libraries(test_c_robustness PRIVATE channel_c PkgConfig::CMOCKA)
+add_test(NAME integration_c_robustness COMMAND test_c_robustness)
 
 add_executable(channel_benchmark bench/benchmark.c)
 target_link_libraries(channel_benchmark PRIVATE channel_c)

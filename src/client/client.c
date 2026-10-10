@@ -40,6 +40,11 @@ struct channel_c_client {
   size_t rx_length;
   size_t rx_capacity;
 
+  /* Extra handshake headers: names stored with the trailing ':' lws expects. */
+  char **header_names;
+  char **header_values;
+  size_t header_count;
+
   channel_c_connection_t *connection;
 };
 
@@ -180,11 +185,17 @@ static void client_transport_close(void *ctx) {
   if (client->context) lws_cancel_service(client->context);
 }
 
-static int client_rx_append(struct channel_c_client *client, const char *data, size_t length) {
+static int client_rx_append(struct channel_c_client *client, const char *data, size_t length, size_t remaining) {
   char *buffer;
   size_t required;
 
   if (!client || !data || length == 0) return 0;
+  /* Cap whole messages (fragments included); `remaining` is the rest of the current frame as
+   * announced by its header, so an oversized frame fails on its first bytes. */
+  if (length > CHANNEL_C_MAX_MESSAGE_SIZE - client->rx_length ||
+      remaining > CHANNEL_C_MAX_MESSAGE_SIZE - client->rx_length - length) {
+    return -1;
+  }
 
   required = client->rx_length + length + 1;
   if (required > client->rx_capacity) {
@@ -230,7 +241,7 @@ static int client_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
       break;
 
     case LWS_CALLBACK_CLIENT_RECEIVE:
-      if (client_rx_append(client, (const char *)in, length) != 0) return -1;
+      if (client_rx_append(client, (const char *)in, length, lws_remaining_packet_payload(wsi)) != 0) return -1;
       if (lws_is_final_fragment(wsi) && lws_remaining_packet_payload(wsi) == 0) {
         client->progress_counter += 1;
         channel_c_connection_receive_text(client->connection, client->rx_buffer);
@@ -281,6 +292,28 @@ static int client_ws_callback(struct lws *wsi, enum lws_callback_reasons reason,
 
         if (write_failed) return -1;
         if (client->queue_head) lws_callback_on_writable(wsi);
+      }
+      break;
+
+    case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
+      {
+        unsigned char **position = (unsigned char **)in;
+        unsigned char *end;
+        size_t index;
+        if (!position || !*position) break;
+        end = *position + length;
+        for (index = 0; index < client->header_count; index += 1) {
+          if (lws_add_http_header_by_name(
+                wsi,
+                (const unsigned char *)client->header_names[index],
+                (const unsigned char *)client->header_values[index],
+                (int)strlen(client->header_values[index]),
+                position,
+                end
+              ) != 0) {
+            return -1;
+          }
+        }
       }
       break;
 
@@ -373,6 +406,62 @@ static int client_poll_local(void *ctx) {
   return client->progress_counter != start_progress ? 1 : 0;
 }
 
+static void client_free_headers(struct channel_c_client *client) {
+  size_t index;
+  if (!client) return;
+  for (index = 0; index < client->header_count; index += 1) {
+    free(client->header_names[index]);
+    free(client->header_values[index]);
+  }
+  free(client->header_names);
+  free(client->header_values);
+  client->header_names = NULL;
+  client->header_values = NULL;
+  client->header_count = 0;
+}
+
+static int header_text_is_valid(const char *text, int is_name) {
+  const unsigned char *cursor = (const unsigned char *)text;
+  if (!text) return 0;
+  if (is_name && !*cursor) return 0;
+  for (; *cursor; cursor += 1) {
+    if (*cursor == '\r' || *cursor == '\n') return 0;
+    if (is_name && (*cursor <= ' ' || *cursor == ':' || *cursor >= 0x7f)) return 0;
+  }
+  return 1;
+}
+
+/* 0 ok, -1 invalid header, -2 out of memory. */
+static int client_copy_headers(struct channel_c_client *client, const channel_c_header_t *headers, size_t count) {
+  size_t index;
+
+  if (count == 0) return 0;
+  if (!headers) return -1;
+  for (index = 0; index < count; index += 1) {
+    if (!header_text_is_valid(headers[index].name, 1) || !header_text_is_valid(headers[index].value, 0)) return -1;
+  }
+  client->header_names = (char **)calloc(count, sizeof(char *));
+  client->header_values = (char **)calloc(count, sizeof(char *));
+  if (!client->header_names || !client->header_values) return -2;
+  for (index = 0; index < count; index += 1) {
+    size_t name_length = strlen(headers[index].name);
+    char *name = (char *)malloc(name_length + 2);
+    char *value = channel_c_strdup(headers[index].value);
+    if (!name || !value) {
+      free(name);
+      free(value);
+      return -2;
+    }
+    memcpy(name, headers[index].name, name_length);
+    name[name_length] = ':';
+    name[name_length + 1] = '\0';
+    client->header_names[index] = name;
+    client->header_values[index] = value;
+    client->header_count = index + 1;
+  }
+  return 0;
+}
+
 channel_c_client_t *channel_c_client_connect(
   channel_c_channel_t *channel,
   const char *url,
@@ -380,6 +469,21 @@ channel_c_client_t *channel_c_client_connect(
   channel_c_state_destroy_fn state_destroy,
   char **out_error
 ) {
+  channel_c_client_options_t options;
+  memset(&options, 0, sizeof(options));
+  options.state = state;
+  options.state_destroy = state_destroy;
+  return channel_c_client_connect_with_options(channel, url, &options, out_error);
+}
+
+channel_c_client_t *channel_c_client_connect_with_options(
+  channel_c_channel_t *channel,
+  const char *url,
+  const channel_c_client_options_t *options,
+  char **out_error
+) {
+  void *state = options ? options->state : NULL;
+  channel_c_state_destroy_fn state_destroy = options ? options->state_destroy : NULL;
   struct channel_c_client *client;
   struct lws_context_creation_info context_info;
   struct lws_client_connect_info connect_info;
@@ -416,6 +520,20 @@ channel_c_client_t *channel_c_client_connect(
     return NULL;
   }
 
+  if (options && options->header_count > 0) {
+    int copied = client_copy_headers(client, options->headers, options->header_count);
+    if (copied != 0) {
+      client_free_headers(client);
+      free(client->url);
+      free(client->protocol);
+      free(client->address);
+      free(client->path);
+      free(client);
+      if (out_error) *out_error = channel_c_strdup(copied == -1 ? "invalid header" : "internal error");
+      return NULL;
+    }
+  }
+
   transport_ops.send_text = client_transport_send_text;
   transport_ops.close = client_transport_close;
   client->connection = channel_c_internal_failpoint_hit("client.connection_create_fail")
@@ -434,6 +552,7 @@ channel_c_client_t *channel_c_client_connect(
     free(client->protocol);
     free(client->address);
     free(client->path);
+    client_free_headers(client);
     free(client);
     if (out_error) *out_error = channel_c_strdup("internal error");
     return NULL;
@@ -456,6 +575,7 @@ channel_c_client_t *channel_c_client_connect(
     free(client->protocol);
     free(client->address);
     free(client->path);
+    client_free_headers(client);
     free(client);
     if (out_error) *out_error = channel_c_strdup("failed to create websocket context");
     return NULL;
@@ -486,6 +606,7 @@ channel_c_client_t *channel_c_client_connect(
     free(client->protocol);
     free(client->address);
     free(client->path);
+    client_free_headers(client);
     free(client);
     if (out_error) *out_error = channel_c_strdup("failed to connect websocket");
     return NULL;
@@ -505,6 +626,7 @@ channel_c_client_t *channel_c_client_connect(
     free(client->path);
     free(client->last_error);
     queued_message_free_all(client->queue_head);
+    client_free_headers(client);
     free(client);
     if (out_error) *out_error = error_text;
     else free(error_text);
@@ -581,6 +703,7 @@ void channel_c_client_free(channel_c_client_t *client) {
   free(c->address);
   free(c->path);
   free(c->last_error);
+  client_free_headers(c);
   channel_c_connection_release(c->connection);
   free(c);
 }
