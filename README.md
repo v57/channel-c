@@ -7,7 +7,9 @@ Powerful and lightweight communication built for modern language. C implementati
 
 # Installation
 
-Dependencies (installed via Homebrew):
+Dependencies: [libwebsockets](https://libwebsockets.org) (WebSocket client and server) with OpenSSL, and
+[yyjson](https://github.com/ibireme/yyjson) (JSON). `cmocka`, `lcov` and `bun` are for the tests only.
+Installed via Homebrew:
 
 ```bash
 brew install cmake libwebsockets yyjson cmocka lcov pkgconf bun
