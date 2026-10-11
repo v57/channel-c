@@ -13,3 +13,5 @@ coverage/.ts_server_pid
 
 # macOS
 .DS_Store
+CLAUDE.md
+/.claude
