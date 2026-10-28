@@ -4,6 +4,8 @@ project(channel_c VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+# glibc hides POSIX (clock_gettime, nanosleep) under strict C17; macOS ignores this.
+add_compile_definitions(_DEFAULT_SOURCE)
 
 option(ENABLE_COVERAGE "Enable coverage instrumentation" OFF)
 option(CHANNEL_C_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
