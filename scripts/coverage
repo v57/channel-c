@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# In the Hub checkout this runs in its toolchain container (HubTools/hub-run); elsewhere it runs here.
+hub_run="$(dirname "$0")/../../../HubTools/hub-run"
+[[ -n "${HUB_TOOLCHAIN:-}" || ! -x "$hub_run" ]] || exec "$hub_run" bash "$0" "$@"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT/build-coverage"
@@ -44,14 +47,7 @@ fi
 cd "$BUILD_DIR"
 ctest --output-on-failure
 
-GCOV_WRAPPER="$BUILD_DIR/llvm-gcov-wrapper.sh"
-cat > "$GCOV_WRAPPER" <<'WRAP'
-#!/usr/bin/env bash
-exec "$(xcrun --find llvm-cov)" gcov "$@"
-WRAP
-chmod +x "$GCOV_WRAPPER"
-
-lcov --quiet --ignore-errors unused,unsupported --capture --directory "$BUILD_DIR" --output-file "$COVERAGE_DIR/lcov.raw.info" --gcov-tool "$GCOV_WRAPPER"
+lcov --quiet --ignore-errors unused,unsupported --capture --directory "$BUILD_DIR" --output-file "$COVERAGE_DIR/lcov.raw.info"
 lcov --quiet --ignore-errors unused,unsupported --remove "$COVERAGE_DIR/lcov.raw.info" '/opt/*' '/usr/*' '*/tests/*' --output-file "$COVERAGE_DIR/lcov.info"
 
 rm -f "$COVERAGE_DIR/lcov.raw.info"
