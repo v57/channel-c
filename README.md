@@ -102,7 +102,8 @@ HubServer) take one connection per client address and port. Like this port's Web
 doesn't reconnect: when the connection drops, waiting requests fail with `disconnected`. The client sends a
 keepalive every 15 s and both sides use a 30 s idle timeout.
 
-Which languages support QUIC: see `channel/docs/quic.md`.
+Languages with QUIC: TypeScript, Go, Swift, C#, Rust, Python, Elixir, Java, Kotlin, C and Zig; Dart, Ruby and PHP stay
+on WebSocket (libraries and status in `channel/docs/quic.md`).
 
 # Run tests
 ```bash
