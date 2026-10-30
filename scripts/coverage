@@ -21,7 +21,7 @@ trap cleanup EXIT
 
 mkdir -p "$COVERAGE_DIR"
 
-cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
+cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON -DCHANNEL_QUIC=ON
 cmake --build "$BUILD_DIR" -j8
 
 find "$BUILD_DIR" -name '*.gcda' -delete

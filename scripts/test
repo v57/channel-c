@@ -24,7 +24,7 @@ trap cleanup EXIT
 
 mkdir -p "$ROOT/coverage"
 
-cmake --fresh -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DCHANNEL_C_SANITIZE="$([[ "$SANITIZE" == 1 ]] && echo ON || echo OFF)"
+cmake --fresh -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DCHANNEL_QUIC=ON -DCHANNEL_C_SANITIZE="$([[ "$SANITIZE" == 1 ]] && echo ON || echo OFF)"
 cmake --build "$BUILD_DIR" -j8
 
 if nc -z 127.0.0.1 2049 >/dev/null 2>&1; then
